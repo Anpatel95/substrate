@@ -15,9 +15,9 @@
 // along with Substrate. If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
-	BalanceOf, ContractAddressFor, ContractInfo, ContractInfoOf, GenesisConfig, Module,
-	RawAliveContractInfo, RawEvent, Trait, TrieId, Schedule, TrieIdGenerator, gas::Gas,
-	Error, Config, RuntimeReturnCode,
+	BalanceOf, ContractInfo, ContractInfoOf, GenesisConfig, Module,
+	RawAliveContractInfo, RawEvent, Trait, TrieId, Schedule, gas::Gas,
+	Error, Config, RuntimeReturnCode, storage::Storage,
 };
 use assert_matches::assert_matches;
 use hex_literal::*;
@@ -26,6 +26,7 @@ use sp_runtime::{
 	Perbill,
 	traits::{BlakeTwo256, Hash, IdentityLookup, Convert},
 	testing::{Header, H256},
+	AccountId32,
 };
 use frame_support::{
 	assert_ok, assert_err_ignore_postinfo, impl_outer_dispatch, impl_outer_event,
@@ -67,28 +68,30 @@ impl_outer_dispatch! {
 #[macro_use]
 pub mod test_utils {
 	use super::{Test, Balances};
-	use crate::{ContractInfoOf, TrieIdGenerator, CodeHash};
-	use crate::storage::{write_contract_storage, read_contract_storage};
-	use crate::exec::StorageKey;
+	use crate::{
+		ContractInfoOf, CodeHash,
+		storage::Storage,
+		exec::{StorageKey, AccountIdOf},
+	};
 	use frame_support::{StorageMap, traits::Currency};
 
-	pub fn set_storage(addr: &u64, key: &StorageKey, value: Option<Vec<u8>>) {
+	pub fn set_storage(addr: &AccountIdOf<Test>, key: &StorageKey, value: Option<Vec<u8>>) {
 		let contract_info = <ContractInfoOf::<Test>>::get(&addr).unwrap().get_alive().unwrap();
-		write_contract_storage::<Test>(&1, &contract_info.trie_id, key, value).unwrap();
+		Storage::<Test>::write(&1, &contract_info.trie_id, key, value).unwrap();
 	}
-	pub fn get_storage(addr: &u64, key: &StorageKey) -> Option<Vec<u8>> {
+	pub fn get_storage(addr: &AccountIdOf<Test>, key: &StorageKey) -> Option<Vec<u8>> {
 		let contract_info = <ContractInfoOf::<Test>>::get(&addr).unwrap().get_alive().unwrap();
-		read_contract_storage(&contract_info.trie_id, key)
+		Storage::<Test>::read(&contract_info.trie_id, key)
 	}
-	pub fn place_contract(address: &u64, code_hash: CodeHash<Test>) {
-		let trie_id = <Test as crate::Trait>::TrieIdGenerator::trie_id(address);
-		crate::storage::place_contract::<Test>(&address, trie_id, code_hash).unwrap()
+	pub fn place_contract(address: &AccountIdOf<Test>, code_hash: CodeHash<Test>) {
+		let trie_id = Storage::<Test>::generate_trie_id(address);
+		Storage::<Test>::place_contract(&address, trie_id, code_hash).unwrap()
 	}
-	pub fn set_balance(who: &u64, amount: u64) {
+	pub fn set_balance(who: &AccountIdOf<Test>, amount: u64) {
 		let imbalance = Balances::deposit_creating(who, amount);
 		drop(imbalance);
 	}
-	pub fn get_balance(who: &u64) -> u64 {
+	pub fn get_balance(who: &AccountIdOf<Test>) -> u64 {
 		Balances::free_balance(who)
 	}
 	macro_rules! assert_return_code {
@@ -124,7 +127,7 @@ impl frame_system::Trait for Test {
 	type Hash = H256;
 	type Call = Call;
 	type Hashing = BlakeTwo256;
-	type AccountId = u64;
+	type AccountId = AccountId32;
 	type Lookup = IdentityLookup<Self::AccountId>;
 	type Header = Header;
 	type Event = MetaEvent;
@@ -186,9 +189,7 @@ impl Trait for Test {
 	type Time = Timestamp;
 	type Randomness = Randomness;
 	type Currency = Balances;
-	type DetermineContractAddress = DummyContractAddressFor;
 	type Event = MetaEvent;
-	type TrieIdGenerator = DummyTrieIdGenerator;
 	type RentPayment = ();
 	type SignedClaimHandicap = SignedClaimHandicap;
 	type TombstoneDeposit = TombstoneDeposit;
@@ -208,32 +209,10 @@ type Contracts = Module<Test>;
 type System = frame_system::Module<Test>;
 type Randomness = pallet_randomness_collective_flip::Module<Test>;
 
-pub struct DummyContractAddressFor;
-impl ContractAddressFor<H256, u64> for DummyContractAddressFor {
-	fn contract_address_for(_code_hash: &H256, _data: &[u8], origin: &u64) -> u64 {
-		*origin + 1
-	}
-}
-
-pub struct DummyTrieIdGenerator;
-impl TrieIdGenerator<u64> for DummyTrieIdGenerator {
-	fn trie_id(account_id: &u64) -> TrieId {
-		let new_seed = super::AccountCounter::mutate(|v| {
-			*v = v.wrapping_add(1);
-			*v
-		});
-
-		let mut res = vec![];
-		res.extend_from_slice(&new_seed.to_le_bytes());
-		res.extend_from_slice(&account_id.to_le_bytes());
-		res
-	}
-}
-
-const ALICE: u64 = 1;
-const BOB: u64 = 2;
-const CHARLIE: u64 = 3;
-const DJANGO: u64 = 4;
+pub const ALICE: AccountId32 = AccountId32::new([1u8; 32]);
+pub const BOB: AccountId32 = AccountId32::new([2u8; 32]);
+pub const CHARLIE: AccountId32 = AccountId32::new([3u8; 32]);
+pub const DJANGO: AccountId32 = AccountId32::new([4u8; 32]);
 
 const GAS_LIMIT: Gas = 10_000_000_000;
 
@@ -318,8 +297,8 @@ fn account_removal_does_not_remove_storage() {
 	use self::test_utils::{set_storage, get_storage};
 
 	ExtBuilder::default().existential_deposit(100).build().execute_with(|| {
-		let trie_id1 = <Test as Trait>::TrieIdGenerator::trie_id(&1);
-		let trie_id2 = <Test as Trait>::TrieIdGenerator::trie_id(&2);
+		let trie_id1 = Storage::<Test>::generate_trie_id(ALICE);
+		let trie_id2 = Storage::<Test>::generate_trie_id(BOB);
 		let key1 = &[1; 32];
 		let key2 = &[2; 32];
 
